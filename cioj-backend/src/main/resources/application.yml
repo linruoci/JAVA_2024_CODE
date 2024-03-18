@@ -102,3 +102,6 @@ knife4j:
         api-rule: package
         api-rule-resources:
           - com.yupi.cioj.controller
+
+codesandbox:
+  type: example
