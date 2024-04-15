@@ -1,4 +1,4 @@
-package com.yupi.cioj.model.dto.questionsubmit;
+package com.yupi.cioj.judge.codesandbox.model;
 
 import lombok.Data;
 
