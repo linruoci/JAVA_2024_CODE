@@ -27,10 +27,12 @@ import com.ruoci.springbootinit.service.UserService;
 import com.ruoci.springbootinit.utils.ExcelUtils;
 import com.ruoci.springbootinit.utils.SqlUtils;
 import com.yupi.yucongming.dev.model.DevChatResponse;
+import io.reactivex.rxjava3.core.Completable;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.checkerframework.checker.units.qual.C;
 import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -40,6 +42,8 @@ import javax.servlet.http.HttpServletRequest;
 import java.io.File;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadPoolExecutor;
 
 /**
  * 帖子接口
@@ -56,16 +60,16 @@ public class ChartController {
     @Resource
     private UserService userService;
 
-
     @Resource
     private RedissonManager redissonManager;
 
     private final static Gson GSON = new Gson();
 
-
     @Resource
     private AiManager aiManager;
 
+    @Resource
+    private ThreadPoolExecutor threadPoolExecutor;
 
 
     /**
@@ -275,15 +279,12 @@ public class ChartController {
         long size = multipartFile.getSize();
         String originalFilename = multipartFile.getOriginalFilename();
 
-
 //        检验文件大小
         final long ONE_MB = 1024 * 1024L;
         ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR);
-
 //        检验文件后缀(防君子)
         final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
         ThrowUtils.throwIf(validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
-
 //        获取令牌.
         redissonManager.doRateLimit("genChartByAi_" + loginUser.getId());
 
@@ -341,10 +342,125 @@ public class ChartController {
 
 
 
-
     }
 
 
+    @PostMapping("/gen")
+    public BaseResponse<BiResponse> genChartByAiAsync(@RequestPart("file") MultipartFile multipartFile,
+                                                 ChartUploadFileRequest uploadFileRequest, HttpServletRequest request) {
+
+        String goal = uploadFileRequest.getGoal();
+        String name = uploadFileRequest.getName();
+        String chartType = uploadFileRequest.getChartType();
+        User loginUser = userService.getLoginUser(request);
+        Long modelId = 1778372387969347585L;
+
+        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "参数有误!");
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长!");
+
+
+//        校验文件.
+        long size = multipartFile.getSize();
+        String originalFilename = multipartFile.getOriginalFilename();
+
+//        检验文件大小
+        final long ONE_MB = 1024 * 1024L;
+        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR);
+//        检验文件后缀(防君子)
+        final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
+        ThrowUtils.throwIf(validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
+//        获取令牌.
+        redissonManager.doRateLimit("genChartByAi_" + loginUser.getId());
+
+
+//        分析需求:
+//        分析网站用户的增长情况
+//        原始数据:
+//        日期,用户数
+//        1号,10
+//        2号,30
+//        3号,50
+
+        StringBuilder userInput = new StringBuilder();
+        userInput.append("分析需求:").append(goal).append("\n");
+
+
+        String userGoal = goal;
+        if (StringUtils.isNotBlank(chartType)){
+            userGoal += " 请使用" + chartType;
+        }
+
+        userInput.append(userGoal).append("\n");
+        userInput.append("原始数据:").append("\n");
+
+        String result = ExcelUtils.excelToCsv(multipartFile);
+        userInput.append(result);
+        //        插入到数据库当中.
+        Chart chart = new Chart();
+        chart.setGoal(goal);
+        chart.setChartData(result);
+        chart.setStatus("wait");
+        chart.setExecMessage("等待执行");
+        chart.setChartType(chartType);
+        chart.setUserId(loginUser.getId());
+        chart.setName(name);
+        boolean save = chartService.save(chart);
+        ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR, "图标保存失败!");
+
+        CompletableFuture.runAsync(() -> {
+
+//            先更新状态
+            Chart updateChart = new Chart();
+            updateChart.setId(chart.getId());
+            updateChart.setStatus("running");
+            updateChart.setExecMessage("正在进行分析!");
+            boolean b = chartService.updateById(updateChart);
+            if (!b){
+                handleUpdateError(chart.getId(), "更新运行状态失败!");
+            }
+
+            String content = aiManager.doChat(modelId, userInput.toString());
+//        切分一下.
+            String[] split = content.split("【【【【【");
+            ThrowUtils.throwIf(split.length < 3, new BusinessException(ErrorCode.SYSTEM_ERROR, "Ai生成错误!!"));
+
+            String genChart = split[1].trim();
+            String genResult = split[2].trim();
+
+            Chart chartUpdateResult = new Chart();
+            chartUpdateResult.setId(chart.getId());
+            chartUpdateResult.setGenChart(genChart);
+            chartUpdateResult.setGenResult(genResult);
+            chartUpdateResult.setStatus("succeed");
+            chartUpdateResult.setExecMessage("图表生成成功!");
+            b = chartService.updateById(updateChart);
+            if (!b){
+                handleUpdateError(chart.getId(), "更新图表数据时失败!");
+            }
+        }, threadPoolExecutor);
+
+
+
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
+
+
+
+    }
+
+    public void handleUpdateError(long chartId, String execMessage){
+        Chart chart = new Chart();
+        chart.setId(chartId);
+        chart.setStatus("fail");
+        chart.setExecMessage(execMessage);
+        boolean b = chartService.updateById(chart);
+
+        if (!b){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统异常! 无法更新更新失败时的状态!");
+        }
+
+    }
 
 
 
