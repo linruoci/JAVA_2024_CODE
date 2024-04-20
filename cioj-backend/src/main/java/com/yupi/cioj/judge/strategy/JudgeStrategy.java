@@ -1,6 +1,6 @@
 package com.yupi.cioj.judge.strategy;
 
-import com.yupi.cioj.model.dto.questionsubmit.JudgeInfo;
+import com.yupi.cioj.judge.codesandbox.model.JudgeInfo;
 
 /**
  * @Author: ruoci

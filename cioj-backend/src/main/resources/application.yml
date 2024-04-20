@@ -104,4 +104,4 @@ knife4j:
           - com.yupi.cioj.controller
 
 codesandbox:
-  type: example
+  type: remote

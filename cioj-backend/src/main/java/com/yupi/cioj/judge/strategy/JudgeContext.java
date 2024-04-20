@@ -1,7 +1,7 @@
 package com.yupi.cioj.judge.strategy;
 
 import com.yupi.cioj.model.dto.question.JudgeCase;
-import com.yupi.cioj.model.dto.questionsubmit.JudgeInfo;
+import com.yupi.cioj.judge.codesandbox.model.JudgeInfo;
 import com.yupi.cioj.model.entity.Question;
 import com.yupi.cioj.model.entity.QuestionSubmit;
 import lombok.Data;
