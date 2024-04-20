@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
 import com.ruoci.springbootinit.annotation.AuthCheck;
+import com.ruoci.springbootinit.bizmq.BiProducer;
 import com.ruoci.springbootinit.common.BaseResponse;
 import com.ruoci.springbootinit.common.DeleteRequest;
 import com.ruoci.springbootinit.common.ErrorCode;
@@ -70,6 +71,12 @@ public class ChartController {
 
     @Resource
     private ThreadPoolExecutor threadPoolExecutor;
+
+
+    @Resource
+    private BiProducer biMessageProducer;
+
+
 
 
     /**
@@ -284,7 +291,7 @@ public class ChartController {
         ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR);
 //        检验文件后缀(防君子)
         final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
-        ThrowUtils.throwIf(validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
+        ThrowUtils.throwIf(!validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
 //        获取令牌.
         redissonManager.doRateLimit("genChartByAi_" + loginUser.getId());
 
@@ -329,12 +336,14 @@ public class ChartController {
         chart.setGenResult(genResult);
         chart.setUserId(loginUser.getId());
         chart.setName(name);
+        chart.setExecMessage("生成成功!");
+        chart.setStatus("succeed");
         chartService.save(chart);
 
         BiResponse biResponse = new BiResponse();
 
-        biResponse.setGenResult(genChart);
-        biResponse.setGenChart(genResult);
+        biResponse.setGenResult(genResult);
+        biResponse.setGenChart(genChart);
         biResponse.setChartId(chart.getId());
 
 
@@ -345,7 +354,7 @@ public class ChartController {
     }
 
 
-    @PostMapping("/gen")
+    @PostMapping("/genChartAsync")
     public BaseResponse<BiResponse> genChartByAiAsync(@RequestPart("file") MultipartFile multipartFile,
                                                  ChartUploadFileRequest uploadFileRequest, HttpServletRequest request) {
 
@@ -368,7 +377,7 @@ public class ChartController {
         ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR);
 //        检验文件后缀(防君子)
         final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
-        ThrowUtils.throwIf(validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
+        ThrowUtils.throwIf(!validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
 //        获取令牌.
         redissonManager.doRateLimit("genChartByAi_" + loginUser.getId());
 
@@ -416,7 +425,7 @@ public class ChartController {
             updateChart.setExecMessage("正在进行分析!");
             boolean b = chartService.updateById(updateChart);
             if (!b){
-                handleUpdateError(chart.getId(), "更新运行状态失败!");
+                chartService.handleUpdateError(chart.getId(), "更新运行状态失败!");
             }
 
             String content = aiManager.doChat(modelId, userInput.toString());
@@ -433,9 +442,9 @@ public class ChartController {
             chartUpdateResult.setGenResult(genResult);
             chartUpdateResult.setStatus("succeed");
             chartUpdateResult.setExecMessage("图表生成成功!");
-            b = chartService.updateById(updateChart);
+            b = chartService.updateById(chartUpdateResult);
             if (!b){
-                handleUpdateError(chart.getId(), "更新图表数据时失败!");
+                chartService.handleUpdateError(chart.getId(), "更新图表数据时失败!");
             }
         }, threadPoolExecutor);
 
@@ -445,22 +454,78 @@ public class ChartController {
         biResponse.setChartId(chart.getId());
         return ResultUtils.success(biResponse);
 
-
-
     }
 
-    public void handleUpdateError(long chartId, String execMessage){
-        Chart chart = new Chart();
-        chart.setId(chartId);
-        chart.setStatus("fail");
-        chart.setExecMessage(execMessage);
-        boolean b = chartService.updateById(chart);
 
-        if (!b){
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统异常! 无法更新更新失败时的状态!");
+    @PostMapping("/genChartMq")
+    public BaseResponse<BiResponse> genChartByAiMq(@RequestPart("file") MultipartFile multipartFile,
+                                                      ChartUploadFileRequest uploadFileRequest, HttpServletRequest request) {
+
+        String goal = uploadFileRequest.getGoal();
+        String name = uploadFileRequest.getName();
+        String chartType = uploadFileRequest.getChartType();
+        User loginUser = userService.getLoginUser(request);
+        Long modelId = CommonConstant.MODEL_ID;
+
+        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "参数有误!");
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长!");
+
+//        校验文件.
+        long size = multipartFile.getSize();
+        String originalFilename = multipartFile.getOriginalFilename();
+
+//        检验文件大小
+        final long ONE_MB = 1024 * 1024L;
+        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR);
+//        检验文件后缀(防君子)
+        final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
+        ThrowUtils.throwIf(!validFileSuffixList.contains(FileUtil.getSuffix(originalFilename)), ErrorCode.PARAMS_ERROR, "文件非法");
+//        获取令牌.
+        redissonManager.doRateLimit("genChartByAi_" + loginUser.getId());
+
+//        分析需求:
+//        分析网站用户的增长情况
+//        原始数据:
+//        日期,用户数
+//        1号,10
+//        2号,30
+//        3号,50
+
+        StringBuilder userInput = new StringBuilder();
+        userInput.append("分析需求:").append(goal).append("\n");
+
+        String userGoal = goal;
+        if (StringUtils.isNotBlank(chartType)){
+            userGoal += " 请使用" + chartType;
         }
+        userInput.append(userGoal).append("\n");
+        userInput.append("原始数据:").append("\n");
+
+        String result = ExcelUtils.excelToCsv(multipartFile);
+        userInput.append(result);
+        //        插入到数据库当中.
+        Chart chart = new Chart();
+        chart.setGoal(goal);
+        chart.setChartData(result);
+        chart.setStatus("wait");
+        chart.setExecMessage("等待执行");
+        chart.setChartType(chartType);
+        chart.setUserId(loginUser.getId());
+        chart.setName(name);
+        boolean save = chartService.save(chart);
+        ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR, "图标保存失败!");
+
+//        发送到MQ
+        biMessageProducer.sendMessage(String.valueOf(chart.getId()));
+
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
 
     }
+
+
+
 
 
 
