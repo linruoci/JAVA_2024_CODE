@@ -69,13 +69,20 @@ public class BiConsumer {
             chartUpdateResult.setStatus("succeed");
             chartUpdateResult.setExecMessage("图表生成成功!");
             b = chartService.updateById(chartUpdateResult);
+
             if (!b){
                 log.error("更新图表数据失败!");
                 channel.basicNack(deliveryTag, false, false);
                 chartService.handleUpdateError(chart.getId(), "更新图表数据时失败!");
             }
+            channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
             log.error("图表执行失败!");
+            try {
+                channel.basicNack(deliveryTag, false, false);
+            } catch (IOException ex) {
+                e.printStackTrace();
+            }
             throw new RuntimeException(e);
         }
 
